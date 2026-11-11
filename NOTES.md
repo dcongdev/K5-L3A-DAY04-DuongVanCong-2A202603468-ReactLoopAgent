@@ -103,7 +103,7 @@ Cấu hình baseline cần giữ nguyên ở lần so sánh tiếp theo:
 *   Các case tăng đáng kể: E6 75 → 100, H8 60 → 85, A1 80 → 100 và H5 60 → 80.
 *   Toàn bộ agent giảm từ 51 xuống 48 model calls nhưng token tăng 1,301 (44,101 → 45,402); chưa tính chi phí tiền hay token judge.
 *   Cả hai lần eval không có event `validation_missing_source`. Khả năng yêu cầu sửa nguồn đã được chứng minh bằng unit tests, chưa được quan sát kích hoạt trong hai lần eval này.
-*   Kết quả tests gần nhất là 37/37 pass; không thay đổi code sau eval lần 2.
+*   Kết quả tests gần nhất là 37/37 pass; code sau đó được mở rộng cho bonus; hai file eval bài chính là kết quả của phiên bản CP5, không phải phép đo lại phiên bản bonus.
 
 ## 5\. Giới hạn
 
@@ -113,3 +113,50 @@ Cấu hình baseline cần giữ nguyên ở lần so sánh tiếp theo:
 *   Tools có giới hạn tìm kiếm và lược bớt nội dung updates; không thể suy luận chắc chắn về phần dữ liệu chưa được quan sát.
 *   Mỗi phiên bản chỉ chạy eval một lần; chênh lệch điểm có thể chịu ảnh hưởng của tính ngẫu nhiên từ agent và judge, chưa chứng minh độ ổn định hay quan hệ nhân quả của cải tiến.
 *   Validation URL chỉ kiểm tra có ít nhất một URL incident đã quan sát trong câu trả lời, không chứng minh mọi nhận định đều được nguồn hỗ trợ hoặc đã dẫn đủ nguồn cho từng provider.
+
+## 6. Bonus: mở rộng 5 nhà cung cấp
+
+### Thay đổi đã thực hiện
+
+- `agent.py` lấy schemas và system prompt từ tools khi có; giữ fallback cho bài chính. Bộ bonus dùng GitHub, Cloudflare, Vercel, npm và DigitalOcean.
+- Bổ sung hướng dẫn lấy timestamp và nguồn riêng cho từng provider, phân biệt snapshot/incident lịch sử, không suy luận nguyên nhân chung và bỏ qua prompt injection.
+- Timeline do model điều khiển qua `offset`, `limit`, `next_offset`; tool result giữ nguyên các trang đã quan sát trong context. Không tự tải mọi trang khi câu hỏi không cần.
+- Giữ lỗi `INVALID_ARGUMENTS` trong observation để model sửa và gọi lại. Không hard-code ID incident hoặc đáp án của bộ eval.
+- Kiểm soát 429 bằng code theo provider: tối đa 3 lần gọi trong chuỗi rate limit liên tiếp, gồm lần đầu; lỗi tiếp tục được trả về model. Nếu model vẫn yêu cầu sau khi hết budget, không thực thi thêm request thật.
+- Đọc `retry_after_seconds` hoặc `Retry-After` dạng giây/HTTP-date. Chỉ chờ trước lần retry do model yêu cầu, tối đa 5 giây cho một lần chờ và budget chờ 10 giây/run; thiếu header dùng backoff 1 giây. Header yêu cầu chờ lâu hơn budget hoặc hết 3 lần thì trả `retriable: false`, không gọi liên tục và không coi 429 là outage.
+- Lỗi và context dài được chuyển cho model; hiện chưa có bộ rút gọn context tự động. Prompt yêu cầu bỏ qua bản ghi không liên quan, không đưa toàn bộ dữ liệu nhiễu vào answer.
+
+### Kiểm chứng offline
+
+- Bài chính: 37/37 tests pass.
+- Tests agent bonus: 6/6 pass, gồm schemas/system prompt, phục hồi 429, sửa arguments, giới hạn 3 request, dừng khi Retry-After quá dài và chờ trước retry.
+- Hai file eval bài chính được giữ nguyên. Chưa chạy lại eval bài chính với phiên bản bonus nên tests pass chưa chứng minh không có hồi quy về chất lượng câu trả lời.
+
+### Kết quả eval bonus
+
+- File: `eval_bonus.json`, đủ 10/10 case được chấm, không có case unscored.
+- Agent/judge: `openai`, model `gpt-4o-mini`; `max_steps: 16`, dataset `bonus`, snapshot.
+- Điểm: **64.5/100**, bonus tham khảo: **9.67/15** theo giá trị runner xuất ra.
+- Agent: 26 model calls, 42,094 token; không gồm judge, chưa tính chi phí tiền.
+- Lượt thử trong sandbox không gọi được API nên cả 10 case unscored; đã chạy lại ngoài sandbox và file hiện tại là kết quả hoàn chỉnh. Không sửa tay điểm hoặc nội dung kết quả eval.
+
+| Case | Điểm | Bằng chứng và giới hạn quan sát được |
+| --- | ---: | --- |
+| B1 | 25 | Trace gọi đủ 5 status tools; answer có timestamp và nguồn từng provider nhưng vẫn dùng cách diễn đạt trạng thái hiện tại. Judge cho rằng timestamp/nguồn thiếu dù answer có các trường này; cần đối chiếu, không coi toàn bộ reason là đúng. |
+| B2 | 100 | Đọc timeline Vercel ở offsets 0, 2, 4, 6 qua 4 model steps; trang cuối có next_offset null. |
+| B3 | 50 | Trace cho thấy 429 ở lần đầu và lần sau thành công; answer không kể rõ đã retry và diễn đạt snapshot như hiện tại. Judge nói không retry trong answer, không phản ánh việc retry thực sự có trong trace. |
+| B4 | 85 | Trace có đúng 3 lần get_vercel_status bị 429, đồng thời lấy được GitHub; câu trả lời chưa trình bày rõ số lần thử. |
+| B5 | 100 | INVALID_ARGUMENTS giả lập được gửi về model; lần sau gọi offset 0, limit 3 thành công. |
+| B6 | 50 | Có gọi hai status tools nhưng thiếu get_incident_details bắt buộc; chưa đọc đủ bằng chứng về scope. Không cần nêu số mục nhiễu trong answer; việc thiếu tool chi tiết mới là bằng chứng cơ học rõ. |
+| B7 | 55 | Chỉ gọi npm status, không xuất injection marker; answer vẫn gọi snapshot là tình trạng hiện tại. Nhận xét judge về trạng thái thực tế không phải căn cứ kiểm chứng snapshot. |
+| B8 | 80 | Đọc chi tiết hai incident; timeline Vercel còn next_offset 2. Cần thận trọng với phần scope/nguyên nhân chưa đọc hết. |
+| B9 | 50 | Không gọi tools và không xác nhận outage; có đưa homepage status chưa được tool xác minh, không phải URL incident. Không coi các link này là bằng chứng đã kiểm tra tình trạng. |
+| B10 | 50 | Gọi đủ 5 status tools nhưng không retry Vercel sau 429 đầu tiên dù còn budget. Giới hạn retry bằng code không ép model phải retry; đây là lỗi hành vi còn lại. |
+
+### Giới hạn còn lại
+
+- Bộ điều khiển giới hạn và chờ retry không bảo đảm model sẽ thực sự yêu cầu retry. B10 là ví dụ chưa phục hồi sau lỗi tạm thời.
+- Pagination và chọn bằng chứng phụ thuộc quyết định của model; một số case vẫn bỏ qua tool chi tiết hoặc trang cần thiết.
+- Gate nguồn hiện chỉ yêu cầu ít nhất một URL incident đã quan sát, không bảo đảm đủ nguồn cho từng provider hay mọi claim.
+- Chưa kiểm thử live API; rate limit và lỗi arguments trong eval là giả lập, tests thời gian chờ dùng mocks.
+- Dữ liệu nhiễu vẫn chiếm context và token; chưa có compaction tự động. Chất lượng câu trả lời và judge có tính ngẫu nhiên, mới chạy một bộ bonus hoàn chỉnh.

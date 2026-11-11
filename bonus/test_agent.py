@@ -3,6 +3,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from agent import run_agent
@@ -27,6 +28,39 @@ class ScriptedProvider:
 
 
 class BonusAgentTests(unittest.TestCase):
+    def test_persistent_429_stops_executing_after_three_attempts(self):
+        tools = BonusTools(scenario='rate_limit_always')
+        responses = [call(str(i), 'get_vercel_status', {}) for i in range(4)]
+        provider = ScriptedProvider(responses + [final('Không xác nhận được Vercel.')])
+        result = run_agent('Kiểm tra', provider, tools, max_steps=5)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(tools.calls[('get_vercel_status', 'vercel')], 3)
+        observation = json.loads(provider.histories[-1][-1]['content'])
+        self.assertFalse(observation['retriable'])
+
+    def test_long_retry_after_stops_without_waiting(self):
+        tools = BonusTools()
+        rate_limit = {'ok': False, 'error': 'RATE_LIMITED',
+                      'retry_after': '120', 'retriable': True}
+        provider = ScriptedProvider([call('a', 'get_vercel_status', {}),
+                                     call('b', 'get_vercel_status', {}),
+                                     final('Chưa biết trạng thái Vercel.')])
+        with patch.object(tools, 'execute', return_value=rate_limit) as execute, patch('agent.time.sleep') as sleep:
+            result = run_agent('Kiểm tra', provider, tools)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(execute.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_retry_waits_before_second_request(self):
+        tools = BonusTools()
+        responses = [{'ok': False, 'error': 'RATE_LIMITED', 'retry_after': '2'},
+                     {'provider': 'vercel', 'source': 'https://www.vercel-status.com'}]
+        provider = ScriptedProvider([call('a', 'get_vercel_status', {}),
+                                     call('b', 'get_vercel_status', {}), final()])
+        with patch.object(tools, 'execute', side_effect=responses), patch('agent.time.monotonic', return_value=100), patch('agent.time.sleep') as sleep:
+            run_agent('Kiểm tra', provider, tools)
+        sleep.assert_called_once_with(2.0)
+
     def test_bonus_schemas_and_system_prompt(self):
         t=BonusTools();p=ScriptedProvider([final()])
         self.assertEqual(run_agent('Kiểm tra',p,t)['status'],'completed')
